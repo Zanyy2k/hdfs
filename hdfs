@@ -1,0 +1,196 @@
+#!/bin/bash
+
+# Author : Yu ZongDong
+# Copyright (c) CACIB
+
+# Syntax:
+#   hdfs_to_local_copy_file_1.0.sh
+#-----------------------------------------------------------------
+#   sh hdfs_to_local.sh --filelistpath list.txt  --environment BENCH --timerepeat 2 --sleeptime 2s
+#-----------------------------------------------------------------
+# Script follows here:
+
+### Functions 
+error_handler() {
+    return_code=$?;
+    echo "error_handler called" |& tee -a $1
+    if [[ $return_code != 0 ]];
+    then
+    exit $return_code;
+    fi 
+}
+
+endTimer(){
+    end=$(date +"%T")
+    duration=$SECONDS
+    echo "<--- File Copy ended at $end --->" |& tee -a $1
+    echo "$(($duration / 60)) minutes and $(($duration % 60)) seconds elapsed." |& tee -a $1
+}
+
+startTimer(){
+    now=$(date +"%T")
+    SECONDS=0
+    echo "<--- File Copy started at $now --->" |& tee -a $1
+}
+
+deleteRow(){
+    # echo $1 $2
+    arr=($(echo $1 | tr '/' "\n"))
+    args=$args"/${arr[-3]}\/${arr[-2]}\/${arr[-1]}/d"
+    sed -i $args $2
+    echo "Path stored and removed from the list!" |& tee -a $3
+    unset args
+}
+
+while [[ $# > 0 ]]
+do
+	case $1 in
+		--filelistpath)
+            DIRECTORY_LIST_PATH="$2"
+            shift
+        ;;
+        --environment)
+            ENVIRONMENT="$2"
+            shift
+        ;;
+        --timerepeat)
+            TIME_REPEAT="$2"
+            shift
+        ;;
+        --sleeptime)
+            SLEEP_TIME="$2"
+            shift
+        ;;
+        *)
+			echo "Unknown parameter $1"
+			usage
+			exit 1
+		;;
+	esac
+	shift
+done
+echo "File list path : $DIRECTORY_LIST_PATH"
+echo "Environment : $ENVIRONMENT"
+echo "Time repeat : $TIME_REPEAT"
+echo "Sleep Time : $SLEEP_TIME"
+echo |& tee -a ${LOG_FILE}
+
+### Create a log to keep track of the progress
+run_date=$(date +%Y%m%d)
+log_file_location="/Soft/MAI_LANDINGZONE_${ENVIRONMENT}/input/UAT/log/hdfs-local/${run_date}"
+echo $log_file_location
+mkdir -p ${log_file_location}
+LOG_FILE="${log_file_location}/masai_hdfs-local_${run_date}.log"
+
+### Create mapping and  assign counter to each source
+declare -A counterList 
+counter=0;
+num_of_lines=0;
+exceed=0;
+
+for path in $(cat $DIRECTORY_LIST_PATH); do
+    
+    ### Return 0 if directory exists else return 1
+    hdfs dfs -test -e $path
+    return_code=$?
+    # echo $return_code
+    
+    if [ $return_code = 0 ]
+    then
+        counterList[$path]=$counter
+        ((++num_of_lines))
+        # echo $num_of_lines
+    else
+        echo "This path doesnot exist! : $path" |& tee -a ${LOG_FILE}
+        deleteRow $path $DIRECTORY_LIST_PATH $LOG_FILE
+        echo |& tee -a ${LOG_FILE}
+    fi 
+done    
+
+### Check if the provided file is emptied
+while [ -s $DIRECTORY_LIST_PATH ]; do
+    echo "List File is not empty" |& tee -a ${LOG_FILE}
+    # cat ${DIRECTORY_LIST_PATH}
+    echo |& tee -a ${LOG_FILE}
+
+    ### Check if the number file  that exceed the limit is lesser than the number of file left
+    if [ $exceed -lt $num_of_lines ]
+        then 
+        ### Iterate through the list of HDFS directories
+        for path in $(cat $DIRECTORY_LIST_PATH); do
+            echo "Source Location : $path" |& tee -a ${LOG_FILE}
+            if [ ${counterList[$path]} -le $TIME_REPEAT ]
+            then
+                sourceArr=($(echo $path | tr '/' "\n"))
+                
+                asOfDate=${sourceArr[-3]}
+                foSystem=${sourceArr[-2]}
+                objType=${sourceArr[-1]}
+
+                # echo "As_Of_Date : ${sourceArr[-3]}"
+                # echo "FO System : ${sourceArr[-2]}"
+                # echo "Object Type : ${sourceArr[-1]}"
+
+                ### Set the target location
+                target=/Soft/MAI_LANDINGZONE_BENCH/input/$foSystem
+                # target=/Soft/MAI_LANDINGZONE_BENCH/input/UAT/test/$asOfDate/$foSystem
+                echo "Target Location : $target" |& tee -a ${LOG_FILE}
+                
+                ### Check if target file is empty
+                if [ ! "$(ls -A $target)" ]
+                then
+                    echo "Target Location is empty!" |& tee -a ${LOG_FILE}
+                    
+                    ### Start Timer
+                    startTimer $LOG_FILE
+
+                    ### Copy files from HDFS source to LandingZone
+                    # echo "hdfs dfs -get $path/* $target"
+                    hdfs dfs -get $path/* $target
+                    error_handler $LOG_FILE
+                    echo "File Copied" |& tee -a ${LOG_FILE}
+                    
+                    ### Delete the source path 
+                    args=$args"/$asOfDate\/$foSystem\/$objType/d"
+                    # echo $args
+                    sed -i $args $DIRECTORY_LIST_PATH
+                    echo "Copy completed & Path deleted" |& tee -a ${LOG_FILE}
+                    unset args
+
+                    ### End Timer
+                    endTimer $LOG_FILE
+                    echo  |& tee -a ${LOG_FILE}
+                else
+                    echo "$target is not empty" |& tee -a ${LOG_FILE}
+                    for entry in "$target"/*
+                    do
+                        echo "$entry" |& tee -a ${LOG_FILE}
+                    done 
+                    newCounter=$((${counterList[$path]}+1))
+                    counterList[$path]=$newCounter
+                    # echo ${counterList[$path]}
+                    
+                    echo "Program Sleeping for $SLEEP_TIME ..." |& tee -a ${LOG_FILE}
+                    sleep $SLEEP_TIME
+                    echo |& tee -a ${LOG_FILE}
+                fi
+            else 
+                exceed=$((exceed+1))
+                # echo $exceed
+                echo "The file exceed the limits" |& tee -a ${LOG_FILE}
+            fi  
+        done
+    else 
+        echo "The remaining files are unable to be copied!" |& tee -a ${LOG_FILE}
+        echo "Terminating Program...." |& tee -a ${LOG_FILE}
+        exit 1
+    fi
+    echo |& tee -a ${LOG_FILE}
+
+    ### Display the value in mapping
+    for key in "${!counterList[@]}"; do 
+        echo "$key" |& tee -a ${LOG_FILE}
+        echo "- ${counterList["$key"]}" |& tee -a ${LOG_FILE}
+    done
+done
+echo "Path file is empty" |& tee -a ${LOG_FILE}
